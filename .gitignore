@@ -1,0 +1,16 @@
+# Go 相關
+# 編譯後的執行檔 (檔名可能與您的資料夾相同)
+goBackend
+*.exe
+
+# 作業系統相關
+.DS_Store
+Thumbs.db
+
+# Node.js / Vue 相關 (為未來做準備)
+node_modules/
+dist/
+.env
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

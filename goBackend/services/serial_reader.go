@@ -1,78 +1,109 @@
-// =================================================================
-// 檔案路徑: services/serial_reader.go
-// 說明: 負責從序列埠讀取和解析資料的服務
-// =================================================================
 package services
 
 import (
-	"bufio"         // 用於帶緩衝的讀取
-	"encoding/json" // 用於解析 JSON
-	"log"           // 用於印出日誌
-	"sync"          // 用於處理並行讀寫的安全問題 (Mutex)
+	"bufio"
+	"encoding/json"
+	"errors"
+	"log"
+	"sync"
+	"strings"
 
-	"iotDashboard/goBackend/models" // 引入我們自己定義的 Model
-
-	"go.bug.st/serial" // 第三方序列埠函式庫
+	"go.bug.st/serial"
+	"iotDashboard/goBackend/models" // 請再次確認這個 import 路徑與您的 go.mod 完全一致
 )
 
-// GlobalDataStore 是一個全域變數，用來儲存最新的一筆感測器資料。
-// 在真實的大型專案中，可能會使用資料庫，但對於這個專案，一個全域變數就足夠了。
-var GlobalDataStore struct {
-	// Mutex (互斥鎖) 是解決並行問題的關鍵。
-	// 當一個 Goroutine (我們的背景讀取任務) 正在寫入最新資料時，
-	// 另一個 Goroutine (處理網頁請求的任務) 可能會同時來讀取。
-	// Mutex 確保同一時間只有一個 Goroutine 能存取 Data，避免資料錯亂。
-	Mu   sync.Mutex
-	Data models.SensorData
+var (
+	port serial.Port
+	GlobalDataStore struct {
+		Mu   sync.Mutex
+		Data models.SensorData
+	}
+	// isFanOn 變數現在用來追蹤 LCD 警告的狀態 (true=警告中, false=正常)
+	isFanOn bool
+	fanControlMutex sync.Mutex
+)
+
+// SendCommandToArduino 函式負責向序列埠寫入指令
+func SendCommandToArduino(command string) error {
+	if port == nil {
+		return errors.New("序列埠未初始化或未連接")
+	}
+	_, err := port.Write([]byte(command))
+	if err != nil {
+		log.Printf("向 Arduino 發送指令失敗: %v", err)
+		return err
+	}
+	log.Printf("成功發送指令: %s", command)
+	return nil
 }
 
-// StartSerialReader 是一個會在背景持續運行的函式
-// 它接收序列埠名稱 (例如 "COM3") 作為參數
+// 檢查溫度並決定是否要觸發 LCD 警告
+func checkTemperatureAndManageWarning(temp float32) {
+	// 鎖定，確保同一時間只有一個執行緒在做決策
+	fanControlMutex.Lock()
+	// 使用 defer 確保函式結束時一定會解鎖
+	defer fanControlMutex.Unlock()
+
+	// 定義溫度的觸發閾值
+	const upperThreshold float32 = 28.0
+	const lowerThreshold float32 = 27.0
+
+	// --- 決策邏輯 ---
+	// 如果溫度高於上限，且目前警告是關閉的
+	if temp > upperThreshold && !isFanOn {
+		log.Println("溫度過高！正在發送「LCD 顯示警告」指令...")
+		// 發送 'W1' 指令來開啟警告
+		err := SendCommandToArduino("W1")
+		if err == nil {
+			isFanOn = true // 指令發送成功後，才更新狀態
+		}
+	} else if temp < lowerThreshold && isFanOn { // 如果溫度低於下限，且目前警告是開啟的
+		log.Println("溫度已降低。正在發送「LCD 清除警告」指令...")
+		// 發送 'W0' 指令來關閉警告
+		err := SendCommandToArduino("W0")
+		if err == nil {
+			isFanOn = false // 指令發送成功後，才更新狀態
+		}
+	}
+}
+
+// StartSerialReader 函式負責在背景持續讀取序列埠
 func StartSerialReader(portName string) {
-	// 設定序列埠的參數
 	mode := &serial.Mode{
-		BaudRate: 9600, // 鮑率必須和 Arduino 程式中的 Serial.begin(9600) 一致
+		BaudRate: 9600,
 	}
 
-	// 嘗試打開指定的序列埠
-	port, err := serial.Open(portName, mode)
+	var err error
+	port, err = serial.Open(portName, mode)
 	if err != nil {
-		// 如果打開失敗 (例如 COM Port 名稱錯誤或被佔用)，印出錯誤並結束程式
 		log.Fatalf("無法打開序列埠 %s: %v", portName, err)
 	}
 	log.Printf("成功打開序列埠 %s，開始監聽...", portName)
 
-	// 使用 bufio.NewScanner 來幫助我們一次讀取一行資料
-	// Arduino 每次傳送一筆 JSON 資料後都會換行，所以這個方法非常適合
 	scanner := bufio.NewScanner(port)
 	for scanner.Scan() {
-		// 讀取到一行文字 (也就是我們的 JSON 字串)
 		line := scanner.Text()
 
-		// 建立一個空的 SensorData 結構體變數，用來存放解析後的資料
-		var data models.SensorData
+		if !strings.HasPrefix(line, "{") || !strings.HasSuffix(line, "}") {
+			log.Printf("收到格式不符的資料，已跳過: %s", line)
+			continue
+		}
 
-		// 嘗試將讀取到的 JSON 字串解析到 data 變數中
+		var data models.SensorData
 		err := json.Unmarshal([]byte(line), &data)
 		if err != nil {
-			// 如果解析失敗 (可能資料不完整或格式錯誤)，印出錯誤訊息並繼續下一輪讀取
 			log.Printf("解析 JSON 失敗: %v, 原始資料: %s", err, line)
 			continue
 		}
 
-		// --- 寫入全域變數 ---
-		// 在寫入資料前，先鎖定 Mutex，防止其他 Goroutine 同時讀取
 		GlobalDataStore.Mu.Lock()
-		// 更新全域變數中的資料
 		GlobalDataStore.Data = data
-		// 寫入完成後，解鎖 Mutex，讓其他 Goroutine 可以讀取
 		GlobalDataStore.Mu.Unlock()
 
-		// 在後端控制台印出收到的資料，方便除錯
-		// log.Printf("收到資料: 溫度=%.2f°C, 濕度=%.2f%%", data.Temperature, data.Humidity)
+		// 每次收到新數據，就呼叫決策函式
+		go checkTemperatureAndManageWarning(data.Temperature)
 	}
 
-	// 如果 scanner 迴圈因為錯誤而結束，印出錯誤訊息
 	if err := scanner.Err(); err != nil {
 		log.Printf("從序列埠讀取時發生錯誤: %v", err)
 	}

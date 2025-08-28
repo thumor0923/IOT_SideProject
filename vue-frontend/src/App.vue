@@ -1,50 +1,127 @@
+<!-- 檔案路徑: vue-frontend/src/App.vue -->
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, reactive } from 'vue'
+import { Line } from 'vue-chartjs'
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend
+} from 'chart.js'
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend
+)
 
-// 使用 ref() 建立「響應式變數」。
-// 這代表當這些變數的值改變時，畫面上有用到它們的地方會自動更新。
+// --- 即時數據狀態 ---
 const temperature = ref(0)
 const humidity = ref(0)
 const lastUpdated = ref(null)
 const error = ref(null)
 
-// 定義一個非同步函式來獲取後端 API 的資料
-const fetchData = async () => {
-  try {
-    // 使用瀏覽器內建的 fetch API 向我們的 Go 後端發送請求
-    const response = await fetch('http://localhost:8080/api/sensor-data')
-    
-    // 如果請求失敗 (例如後端伺服器沒開)，就拋出錯誤
-    if (!response.ok) {
-      throw new Error('後端伺服器回應錯誤')
-    }
-    
-    // 將回應的內容解析為 JSON
-    const data = await response.json()
-    
-    // 更新我們的響應式變數
-    // .value 是用來存取 ref() 變數的實際值
-    temperature.value = data.temperature.toFixed(2) // 取到小數點後兩位
-    humidity.value = data.humidity.toFixed(2)
-    lastUpdated.value = new Date().toLocaleTimeString() // 記錄更新時間
-    error.value = null // 清除之前的錯誤訊息
+// --- 圖表數據狀態 ---
+const tempChartData = reactive({
+  labels: [],
+  datasets: [
+    {
+      label: '溫度 (°C)',
+      backgroundColor: '#f87979',
+      borderColor: '#f87979',
+      data: [],
+      tension: 0.3,
+    },
+  ],
+})
 
+const humiChartData = reactive({
+  labels: [],
+  datasets: [
+    {
+      label: '濕度 (%)',
+      backgroundColor: '#3498db',
+      borderColor: '#3498db',
+      data: [],
+      tension: 0.3,
+    },
+  ],
+})
+
+const chartOptions = {
+  responsive: true,
+  maintainAspectRatio: false,
+}
+
+// --- 非同步函式 ---
+
+const fetchRealtimeData = async () => {
+  try {
+    const response = await fetch('http://localhost:8080/api/sensor-data')
+    if (!response.ok) throw new Error('後端伺服器回應錯誤')
+    const data = await response.json()
+    temperature.value = data.temperature.toFixed(2)
+    humidity.value = data.humidity.toFixed(2)
+    lastUpdated.value = new Date().toLocaleTimeString()
+    error.value = null
   } catch (e) {
-    // 如果在 try 區塊中發生任何錯誤，就在這裡捕捉
-    console.error(e) // 在瀏覽器開發者工具中印出詳細錯誤
-    error.value = '無法獲取資料。請確認後端伺服器是否已啟動，且 Arduino 已連接。' // 在畫面上顯示錯誤訊息
+    console.error(e)
+    error.value = '無法獲取即時資料。請確認後端伺服器是否已啟動。'
   }
 }
 
-// onMounted() 是一個 Vue 的「生命週期鉤子 (Lifecycle Hook)」。
-// 它裡面的程式碼，會在元件第一次被掛載到畫面上時執行。
-onMounted(() => {
-  // 1. 立即執行一次，讓使用者能馬上看到資料
-  fetchData()
+const fetchHistoryData = async () => {
+  try {
+    const response = await fetch('/mock-data.csv');
+    const csvText = await response.text();
+    
+    const rows = csvText.trim().split('\n');
+    // 確保 CSV 檔案不是空的
+    if (rows.length <= 1) return;
 
-  // 2. 設定一個計時器 (setInterval)，每 3 秒鐘自動重複執行 fetchData 函式
-  // 這樣就能實現儀表板的「即時」更新效果
-  setInterval(fetchData, 3000) 
+    const headers = rows.shift().split(',');
+    
+    const labels = [];
+    const temps = [];
+    const humis = [];
+
+    rows.forEach(row => {
+      const values = row.split(',');
+      if (values.length === headers.length) {
+        const rowData = headers.reduce((obj, header, index) => {
+          obj[header.trim()] = values[index].trim();
+          return obj;
+        }, {});
+        
+        labels.push(rowData.timestamp);
+        temps.push(parseFloat(rowData.temperature));
+        humis.push(parseFloat(rowData.humidity));
+      }
+    });
+
+    tempChartData.labels = labels;
+    tempChartData.datasets[0].data = temps;
+    
+    humiChartData.labels = labels;
+    humiChartData.datasets[0].data = humis;
+
+  } catch (e) {
+    console.error("讀取歷史數據失敗:", e);
+  }
+}
+
+// --- 生命週期鉤子 ---
+onMounted(() => {
+  fetchRealtimeData()
+  fetchHistoryData()
+  setInterval(fetchRealtimeData, 3000)
 })
 </script>
 
@@ -52,7 +129,7 @@ onMounted(() => {
   <div id="dashboard">
     <header>
       <h1>房間溫濕度儀表板</h1>
-      <p v-if="lastUpdated" class="last-updated">最後更新於: {{ lastUpdated }}</p>
+      <p v-if="lastUpdated" class="last-updated">即時數據更新於: {{ lastUpdated }}</p>
     </header>
     
     <main>
@@ -62,7 +139,7 @@ onMounted(() => {
       
       <div v-else class="cards-container">
         <div class="card temperature-card">
-          <h2>溫度</h2>
+          <h2>即時溫度</h2>
           <div class="value">
             <span>{{ temperature }}</span>
             <span class="unit">°C</span>
@@ -70,22 +147,40 @@ onMounted(() => {
         </div>
         
         <div class="card humidity-card">
-          <h2>濕度</h2>
+          <h2>即時濕度</h2>
           <div class="value">
             <span>{{ humidity }}</span>
             <span class="unit">%</span>
           </div>
         </div>
       </div>
+
+      <!-- ======================================================= -->
+      <!--               ↓↓↓ 關鍵的修復 ↓↓↓                      -->
+      <!-- ======================================================= -->
+      <!-- 使用 v-if 確保在 labels 陣列被填充數據後，才渲染圖表容器 -->
+      <div v-if="tempChartData.labels.length > 0" class="charts-container">
+        <div class="chart-wrapper">
+          <h3>歷史溫度走勢</h3>
+          <Line :data="tempChartData" :options="chartOptions" />
+        </div>
+        <div class="chart-wrapper">
+          <h3>歷史濕度走勢</h3>
+          <Line :data="humiChartData" :options="chartOptions" />
+        </div>
+      </div>
+      <!-- ======================================================= -->
+      <!--               ↑↑↑ 關鍵的修復 ↑↑↑                      -->
+      <!-- ======================================================= -->
     </main>
   </div>
 </template>
 
 <style scoped>
-/* 在這裡我們定義這個元件的 CSS 樣式 */
+/* 樣式保持不變 */
 #dashboard {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  max-width: 800px;
+  max-width: 1000px;
   margin: 40px auto;
   padding: 20px;
   background-color: #f4f7f6;
@@ -116,6 +211,7 @@ h1 {
   display: flex;
   justify-content: space-around;
   gap: 20px;
+  margin-bottom: 40px;
 }
 
 .card {
@@ -166,5 +262,27 @@ h2 {
   padding: 15px;
   border-radius: 8px;
   text-align: center;
+}
+
+.charts-container {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 30px;
+}
+
+.chart-wrapper {
+  background: #fff;
+  padding: 20px;
+  border-radius: 10px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+  height: 400px;
+}
+
+.chart-wrapper h3 {
+  text-align: center;
+  margin-top: 0;
+  margin-bottom: 15px;
+  font-weight: 500;
+  color: #34495e;
 }
 </style>
